@@ -1,0 +1,7 @@
+**/.vscode/
+**/.idea/
+**/__pycache__/
+**/models/
+**/*.log
+**/outputs/
+**/data/

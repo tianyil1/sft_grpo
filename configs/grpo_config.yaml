@@ -1,0 +1,53 @@
+# GRPO (Group Relative Policy Optimization) 训练配置
+# 用于在 SFT 基础上进行强化学习优化
+# v2：修复 reward 无区分度的问题
+
+# 模型配置（加载 SFT 训练后的 LoRA adapter）
+model:
+  model_name_or_path: "/data/workspace/skyoneliu/Program/sft_grpo/outputs/sft/best_model"
+  trust_remote_code: true
+  use_lora: true
+  lora_r: 8
+  lora_alpha: 16
+  lora_dropout: 0.05
+
+# 数据配置
+data:
+  dataset_path: "/data/workspace/skyoneliu/Program/sft_grpo/data/grpo_data.json"
+  max_prompt_length: 128
+  max_new_tokens: 96         # 96 tokens：够模型自然结束，且不太慢
+
+# GRPO 算法配置
+grpo:
+  num_generations: 4         # 每个 prompt 生成 4 个回答（保证多样性对比）
+  temperature: 1.0
+
+# 训练配置（demo）
+training:
+  output_dir: "/data/workspace/skyoneliu/Program/sft_grpo/outputs/grpo"
+  num_train_epochs: 1
+  per_device_train_batch_size: 4
+  gradient_accumulation_steps: 1    # 减少梯度累积加快迭代
+  learning_rate: 0.00002     # 2e-5，温和一点避免发散
+  warmup_ratio: 0.1
+  save_steps: 10
+  save_total_limit: 2
+  logging_steps: 1           # 每步都打印
+  save_strategy: "steps"
+  max_steps: 20              # 20 步 × ~2 分钟 = ~40 分钟
+
+# 奖励配置
+reward:
+  reward_type: "rule"
+
+# 硬件配置
+hardware:
+  fp16: false
+  gradient_checkpointing: true
+  dataloader_num_workers: 0
+
+# 其他配置
+misc:
+  seed: 42
+  report_to: "tensorboard"     # 使用 TensorBoard 记录指标
+  run_name: "qwen2.5-3b-grpo-demo-v2"
