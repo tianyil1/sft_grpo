@@ -10,7 +10,6 @@ import os
 from transformers import (
     AutoModelForCausalLM,
     AutoTokenizer,
-    DataCollatorForLanguageModeling,
 )
 from peft import LoraConfig, get_peft_model, TaskType
 from datasets import load_dataset
@@ -25,6 +24,25 @@ logging.basicConfig(
     level=logging.INFO,
 )
 logger = logging.getLogger(__name__)
+
+def configure_t4_attention_kernels():
+    """
+    T4 (sm75) 上禁用需要 sm80/sm90 的 attention kernel。
+    否则在 gradient checkpointing 的 backward 路径可能触发：
+    'Expected is_sm80 || is_sm90 to be true'
+    """
+    if not torch.cuda.is_available():
+        return
+    major, minor = torch.cuda.get_device_capability(0)
+    # sm80=8.0，sm90=9.0；T4=7.5
+    if major < 8:
+        try:
+            torch.backends.cuda.enable_flash_sdp(False)
+            torch.backends.cuda.enable_mem_efficient_sdp(False)
+            torch.backends.cuda.enable_math_sdp(True)
+            logger.info(f"✓ 已禁用 Flash/MemEfficient SDP（sm{major}{minor}），使用 Math SDP")
+        except Exception as e:
+            logger.info(f"⚠ 配置 SDP kernel 失败（忽略继续）：{e}")
 
 
 def load_config(config_path: str) -> dict:
@@ -142,15 +160,28 @@ def train_manual(model, train_dataset, eval_dataset, tokenizer, config):
     logger.info(f"✓ TensorBoard 日志目录: {tb_dir}")
     
     # 数据整理器 - 动态 padding
-    data_collator = DataCollatorForLanguageModeling(
-        tokenizer=tokenizer,
-        mlm=False,
-        pad_to_multiple_of=8,  # 优化训练速度
-    )
+    # 注意：当 batch_size > 1 时，需要显式把 labels pad 成同长度（并对 pad 位置置 -100）
+    def data_collator(features):
+        features_wo_labels = [{k: v for k, v in f.items() if k != "labels"} for f in features]
+        batch = tokenizer.pad(
+            features_wo_labels,
+            padding=True,
+            pad_to_multiple_of=8,
+            return_tensors="pt",
+        )
+        labels = batch["input_ids"].clone()
+        if "attention_mask" in batch:
+            labels[batch["attention_mask"] == 0] = -100
+        batch["labels"] = labels
+        return batch
     
-    # DataLoader - 减小批次大小避免 OOM
-    batch_size = min(config['training']['per_device_train_batch_size'], 1)  # 最多 1
-    logger.info(f"使用批次大小: {batch_size}")
+    # DataLoader
+    # 注意：batch_size 会显著影响峰值显存（尤其是 backward）。
+    # 之前为了保证在 T4 上必定能跑，强制锁为 1；现在改为尊重配置文件。
+    batch_size = int(config['training']['per_device_train_batch_size'])
+    if batch_size < 1:
+        batch_size = 1
+    logger.info(f"使用批次大小: {batch_size}（来自 training.per_device_train_batch_size）")
     
     train_loader = DataLoader(
         train_dataset,
@@ -169,6 +200,14 @@ def train_manual(model, train_dataset, eval_dataset, tokenizer, config):
     # AMP（fp16）: T4 不支持 bf16，这里仅支持 fp16
     use_fp16 = bool(config.get("hardware", {}).get("fp16", False))
     scaler = torch.cuda.amp.GradScaler(enabled=use_fp16)
+
+    # 梯度累计：用小 micro-batch 控制显存峰值，用累计提高等效 batch 稳定性
+    grad_accum_steps = int(config["training"].get("gradient_accumulation_steps", 1))
+    if grad_accum_steps < 1:
+        grad_accum_steps = 1
+    logger.info(
+        f"梯度累计步数: {grad_accum_steps}（等效 batch = {batch_size} × {grad_accum_steps} = {batch_size * grad_accum_steps}）"
+    )
     
     # 学习率调度器（线性 warmup + 余弦退火）
     total_steps = len(train_loader) * config['training']['num_train_epochs']
@@ -193,11 +232,10 @@ def train_manual(model, train_dataset, eval_dataset, tokenizer, config):
     for epoch in range(config['training']['num_train_epochs']):
         logger.info(f"Epoch {epoch + 1}/{config['training']['num_train_epochs']}")
         
+        optimizer.zero_grad(set_to_none=True)
         for step, batch in enumerate(train_loader):
             # 将数据移到 GPU
             batch = {k: v.cuda() for k, v in batch.items()}
-            
-            optimizer.zero_grad(set_to_none=True)
 
             # 前向传播（AMP）
             with torch.cuda.amp.autocast(enabled=use_fp16, dtype=torch.float16):
@@ -205,25 +243,34 @@ def train_manual(model, train_dataset, eval_dataset, tokenizer, config):
                 loss = outputs.loss
 
             # 反向传播（scaler）
+            # 梯度累计：把 loss 按累计步数缩放，保证等效梯度幅度一致
+            loss_to_backprop = loss / grad_accum_steps
             if use_fp16:
-                scaler.scale(loss).backward()
+                scaler.scale(loss_to_backprop).backward()
+            else:
+                loss_to_backprop.backward()
+
+            do_step = ((step + 1) % grad_accum_steps == 0) or ((step + 1) == len(train_loader))
+            if do_step:
                 # unscale 后再 clip
-                scaler.unscale_(optimizer)
+                if use_fp16:
+                    scaler.unscale_(optimizer)
+
+                # 梯度裁剪 & 记录 grad_norm
+                grad_norm = torch.nn.utils.clip_grad_norm_(
+                    [p for p in model.parameters() if p.requires_grad], max_norm=1.0
+                )
+
+                if use_fp16:
+                    scaler.step(optimizer)
+                    scaler.update()
+                else:
+                    optimizer.step()
+
+                scheduler.step()
+                optimizer.zero_grad(set_to_none=True)
             else:
-                loss.backward()
-
-            # 梯度裁剪 & 记录 grad_norm
-            grad_norm = torch.nn.utils.clip_grad_norm_(
-                [p for p in model.parameters() if p.requires_grad], max_norm=1.0
-            )
-
-            if use_fp16:
-                scaler.step(optimizer)
-                scaler.update()
-            else:
-                optimizer.step()
-
-            scheduler.step()
+                grad_norm = torch.tensor(0.0, device="cpu")
             
             total_loss += loss.item()
             global_step += 1
@@ -268,6 +315,9 @@ def main():
     # 加载配置
     logger.info(f"正在加载配置文件: {args.config}")
     config = load_config(args.config)
+
+    # T4: 避免触发 sm80/sm90 专用 kernel
+    configure_t4_attention_kernels()
     
     # 创建输出目录
     os.makedirs(config['training']['output_dir'], exist_ok=True)
