@@ -1,6 +1,6 @@
 # GRPO (Group Relative Policy Optimization) 训练配置
 # 用于在 SFT 基础上进行强化学习优化
-# v2：修复 reward 无区分度的问题
+# v3：FP16 全量训练，group_size=8
 
 # 模型配置（加载 SFT 训练后的 LoRA adapter）
 model:
@@ -19,22 +19,21 @@ data:
 
 # GRPO 算法配置
 grpo:
-  num_generations: 4         # 每个 prompt 生成 4 个回答（保证多样性对比）
+  num_generations: 4         # group_size=4：每个 prompt 生成 4 个回答，速度与质量的平衡
   temperature: 1.0
 
-# 训练配置（demo）
+# 训练配置（全量真实训练）
 training:
   output_dir: "/data/workspace/skyoneliu/Program/sft_grpo/outputs/grpo"
-  num_train_epochs: 1
-  per_device_train_batch_size: 4
-  gradient_accumulation_steps: 1    # 减少梯度累积加快迭代
-  learning_rate: 0.00002     # 2e-5，温和一点避免发散
+  num_train_epochs: 3        # 3 个完整 epoch
+  per_device_train_batch_size: 4   # 必须是 num_generations 的整数倍；=4 意味着每步 1 个 prompt × 4 completions
+  gradient_accumulation_steps: 4   # 等效 4 个 prompt/step，稳定梯度
+  learning_rate: 0.00002     # 2e-5，温和以避免策略发散
   warmup_ratio: 0.1
-  save_steps: 10
-  save_total_limit: 2
-  logging_steps: 1           # 每步都打印
+  save_steps: 100
+  save_total_limit: 3
+  logging_steps: 5
   save_strategy: "steps"
-  max_steps: 20              # 20 步 × ~2 分钟 = ~40 分钟
 
 # 奖励配置
 reward:
@@ -42,12 +41,12 @@ reward:
 
 # 硬件配置
 hardware:
-  fp16: false
+  fp16: true                 # 启用 FP16 混合精度（T4 支持，节省显存约 40%）
   gradient_checkpointing: true
   dataloader_num_workers: 0
 
 # 其他配置
 misc:
   seed: 42
-  report_to: "tensorboard"     # 使用 TensorBoard 记录指标
-  run_name: "qwen2.5-3b-grpo-demo-v2"
+  report_to: "tensorboard"
+  run_name: "qwen2.5-3b-grpo-v3-fp16"
