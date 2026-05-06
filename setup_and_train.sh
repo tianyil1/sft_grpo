@@ -5,7 +5,10 @@
 ############################################################
 
 set -e  # 遇到错误立即退出
-LOG_FILE="/data/workspace/skyoneliu/Program/sft_grpo/training.log"
+
+# 项目根目录（脚本所在目录）
+PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+LOG_FILE="${PROJECT_ROOT}/training.log"
 exec > >(tee -a "$LOG_FILE") 2>&1
 
 echo "=========================================="
@@ -17,13 +20,11 @@ echo "=========================================="
 # 步骤1: 激活 conda 环境
 #############################################
 echo -e "\n[1/6] 激活 conda 环境..."
-# 兼容：原作者环境路径 + 通用 conda/mamba 环境
+# 兼容：通用 conda/mamba 环境（不写死任何个人路径）
 if [ -n "${SFT_GRPO_CONDA_ENV:-}" ]; then
     echo "使用 SFT_GRPO_CONDA_ENV=${SFT_GRPO_CONDA_ENV}"
     source "$(conda info --base 2>/dev/null)/etc/profile.d/conda.sh" 2>/dev/null || true
     conda activate "${SFT_GRPO_CONDA_ENV}" 2>/dev/null || true
-elif [ -f "/apdcephfs_cq9/share_1447896/skyoneliu/miniconda3/bin/activate" ] && [ -d "/apdcephfs_cq9/share_1447896/skyoneliu/miniconda3/envs/sft_grpo" ]; then
-    source /apdcephfs_cq9/share_1447896/skyoneliu/miniconda3/bin/activate /apdcephfs_cq9/share_1447896/skyoneliu/miniconda3/envs/sft_grpo
 else
     # 不强制 conda：允许在 venv / 系统 python 中直接运行
     echo "⚠ 未检测到可用 conda 环境，继续使用当前 Python: $(command -v python)"
@@ -60,7 +61,7 @@ echo "✓ 依赖安装完成"
 #############################################
 echo -e "\n[3/6] 检查模型..."
 
-MODEL_DIR="/data/workspace/skyoneliu/Program/sft_grpo/models/Qwen2.5-3B-Instruct"
+MODEL_DIR="${PROJECT_ROOT}/models/Qwen2.5-3B-Instruct"
 
 if [ -d "$MODEL_DIR" ] && [ "$(ls -A $MODEL_DIR)" ]; then
     echo "✓ 模型已存在于: $MODEL_DIR"
@@ -88,7 +89,7 @@ fi
 # 步骤4: 运行 SFT 训练
 #############################################
 echo -e "\n[4/6] 开始 SFT 训练..."
-cd /data/workspace/skyoneliu/Program/sft_grpo
+cd "${PROJECT_ROOT}"
 
 export CUDA_VISIBLE_DEVICES=0
 python scripts/run_sft.py --config configs/sft_config.yaml
@@ -121,12 +122,12 @@ echo -e "\n[6/6] 所有任务完成!"
 echo "结束时间: $(date)"
 echo "=========================================="
 echo "输出目录:"
-echo "  - SFT 模型: /data/workspace/skyoneliu/Program/sft_grpo/outputs/sft/best_model"
-echo "  - GRPO 模型: /data/workspace/skyoneliu/Program/sft_grpo/outputs/grpo"
+echo "  - SFT 模型: ${PROJECT_ROOT}/outputs/sft/best_model"
+echo "  - GRPO 模型: ${PROJECT_ROOT}/outputs/grpo"
 echo "=========================================="
 echo ""
 echo "查看训练日志:"
 echo "  tmux attach -t sft_grpo_training"
 echo ""
 echo "查看 TensorBoard:"
-echo "  tensorboard --logdir=/data/workspace/skyoneliu/Program/sft_grpo/outputs --port=6006"
+echo "  tensorboard --logdir=${PROJECT_ROOT}/outputs --port=6006"

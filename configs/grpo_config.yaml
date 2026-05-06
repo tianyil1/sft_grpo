@@ -4,7 +4,7 @@
 
 # 模型配置（加载 SFT 训练后的 LoRA adapter）
 model:
-  model_name_or_path: "/data/workspace/skyoneliu/Program/sft_grpo/outputs/sft/best_model"
+  model_name_or_path: "outputs/sft/best_model"
   trust_remote_code: true
   use_lora: true
   lora_r: 8
@@ -13,7 +13,7 @@ model:
 
 # 数据配置
 data:
-  dataset_path: "/data/workspace/skyoneliu/Program/sft_grpo/data/grpo_data.json"
+  dataset_path: "data/grpo_data.json"
   max_prompt_length: 128
   max_new_tokens: 96         # 96 tokens：够模型自然结束，且不太慢
 
@@ -24,7 +24,7 @@ grpo:
 
 # 训练配置（全量真实训练）
 training:
-  output_dir: "/data/workspace/skyoneliu/Program/sft_grpo/outputs/grpo"
+  output_dir: "outputs/grpo"
   num_train_epochs: 3        # 3 个完整 epoch
   per_device_train_batch_size: 4   # 必须是 num_generations 的整数倍；=4 意味着每步 1 个 prompt × 4 completions
   gradient_accumulation_steps: 4   # 等效 4 个 prompt/step，稳定梯度

@@ -255,7 +255,7 @@ def main():
     parser.add_argument('--num_grpo_samples', type=int, default=500,
                         help='GRPO 数据集采样数量（用于 demo）')
     parser.add_argument('--output_dir', type=str,
-                        default='/data/workspace/skyoneliu/Program/sft_grpo/data',
+                        default=os.path.join(os.path.dirname(__file__), '..', 'data'),
                         help='输出目录')
     args = parser.parse_args()
     

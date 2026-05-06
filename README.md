@@ -59,14 +59,11 @@ GRPO 模型 (outputs/grpo/best_model)
 ### 2.2 创建 Conda 环境
 
 ```bash
-# 在已有 miniconda 下创建环境
-/apdcephfs_cq9/share_1447896/skyoneliu/miniconda3/bin/conda create \
-  -p /apdcephfs_cq9/share_1447896/skyoneliu/miniconda3/envs/sft_grpo \
-  python=3.10 -y
+# 创建环境（示例：使用环境名；也可用 -p /abs/path/to/env）
+conda create -n sft_grpo python=3.10 -y
 
 # 激活环境
-source /apdcephfs_cq9/share_1447896/skyoneliu/miniconda3/bin/activate \
-  /apdcephfs_cq9/share_1447896/skyoneliu/miniconda3/envs/sft_grpo
+conda activate sft_grpo
 ```
 
 ### 2.3 安装依赖
@@ -85,7 +82,8 @@ pip install peft datasets pyyaml tensorboard
 ### 2.4 准备数据
 
 ```bash
-cd /data/workspace/skyoneliu/Program/sft_grpo
+# 进入项目根目录（请按实际路径调整）
+cd /path/to/sft_grpo
 
 # 下载并准备开源数据集
 python scripts/prepare_data.py \
@@ -433,11 +431,10 @@ training:
 
 ```bash
 # 激活环境
-source /apdcephfs_cq9/share_1447896/skyoneliu/miniconda3/bin/activate \
-  /apdcephfs_cq9/share_1447896/skyoneliu/miniconda3/envs/sft_grpo
+conda activate sft_grpo
 
 # 启动 TensorBoard（推荐后台运行）
-cd /data/workspace/skyoneliu/Program/sft_grpo
+cd /path/to/sft_grpo
 tensorboard --logdir outputs/ --host 0.0.0.0 --port 6006 --reload_interval 10
 
 # 或使用 tmux 后台运行
@@ -489,8 +486,8 @@ tmux new-session -d -s tensorboard \
 tmux attach -t train
 
 # 查看训练日志（tail -f 实时刷新）
-tail -f /data/workspace/skyoneliu/Program/sft_grpo/training.log
-tail -f /data/workspace/skyoneliu/Program/sft_grpo/grpo_training.log
+tail -f /path/to/sft_grpo/training.log
+tail -f /path/to/sft_grpo/grpo_training.log
 
 # 监控 GPU
 watch -n 1 nvidia-smi

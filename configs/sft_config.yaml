@@ -3,7 +3,7 @@
 
 # 模型配置
 model:
-  model_name_or_path: "/data/workspace/skyoneliu/Program/sft_grpo/models/Qwen2.5-3B-Instruct"
+  model_name_or_path: "models/Qwen2.5-3B-Instruct"
   trust_remote_code: true
   use_lora: true  # 是否使用 LoRA 进行参数高效微调
   lora_r: 16  # LoRA 秩
@@ -12,13 +12,13 @@ model:
 
 # 数据配置
 data:
-  dataset_path: "/data/workspace/skyoneliu/Program/sft_grpo/data/sft_data.json"
+  dataset_path: "data/sft_data.json"
   validation_split_percentage: 10  # 验证集比例
   max_seq_length: 512  # 最大序列长度
 
 # 训练配置
 training:
-  output_dir: "/data/workspace/skyoneliu/Program/sft_grpo/outputs/sft"
+  output_dir: "outputs/sft"
   num_train_epochs: 3  # 训练轮数
   per_device_train_batch_size: 2  # FP16+checkpointing 下可尝试 2；OOM 则改回 1
   per_device_eval_batch_size: 2  # 每个设备的评估批次大小
