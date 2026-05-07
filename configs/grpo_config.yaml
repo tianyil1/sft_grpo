@@ -15,12 +15,16 @@ model:
 data:
   dataset_path: "data/grpo_data.json"
   max_prompt_length: 128
-  max_new_tokens: 96         # 96 tokens：够模型自然结束，且不太慢
+  # 原来 max_new_tokens=96 时，训练日志里 completion_length 经常恒等于 96（被截断）
+  # 先提高上限，让模型有机会自然结束，从而产生更可学习的信号
+  max_new_tokens: 192
 
 # GRPO 算法配置
 grpo:
   num_generations: 4         # group_size=4：每个 prompt 生成 4 个回答，速度与质量的平衡
   temperature: 1.0
+  # KL 约束系数（TRL GRPOConfig.beta），增大可减少策略漂移导致的 KL 尖峰
+  beta: 0.1
 
 # 训练配置（全量真实训练）
 training:

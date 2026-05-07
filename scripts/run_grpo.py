@@ -14,13 +14,58 @@ from trl import GRPOTrainer, GRPOConfig
 from datasets import load_dataset
 import logging
 
-# 设置日志
-logging.basicConfig(
-    format="%(asctime)s - %(levelname)s - %(message)s",
-    datefmt="%Y-%m-%d %H:%M:%S",
-    level=logging.INFO,
-)
+def _setup_logging(log_file: str | None) -> logging.Logger:
+    fmt = logging.Formatter("%(asctime)s - %(levelname)s - %(message)s", "%Y-%m-%d %H:%M:%S")
+    root = logging.getLogger()
+    root.handlers.clear()
+    root.setLevel(logging.INFO)
+
+    sh = logging.StreamHandler()
+    sh.setFormatter(fmt)
+    root.addHandler(sh)
+
+    if log_file:
+        os.makedirs(os.path.dirname(log_file), exist_ok=True)
+        fh = logging.FileHandler(log_file, encoding="utf-8")
+        fh.setFormatter(fmt)
+        root.addHandler(fh)
+
+    return logging.getLogger(__name__)
+
+
 logger = logging.getLogger(__name__)
+
+def _force_input_require_grads(model) -> None:
+    """
+    让 input embeddings 的输出显式 requires_grad=True。
+    这是 LoRA + gradient checkpointing 时常见的必要修复：
+    否则 torch.utils.checkpoint 可能报警告并导致梯度为 None。
+    """
+    # 1) 优先走 transformers/peft 提供的快捷开关
+    if hasattr(model, "enable_input_require_grads"):
+        try:
+            model.enable_input_require_grads()
+            return
+        except Exception:
+            pass
+
+    # 2) 兜底：给 input_embeddings 注册 hook，强制输出参与梯度
+    emb = getattr(model, "get_input_embeddings", lambda: None)()
+    if emb is None:
+        return
+
+    if getattr(emb, "_sft_grpo_require_grads_hooked", False):
+        return
+
+    def _set_requires_grad(_, __, output):
+        try:
+            output.requires_grad_(True)
+        except Exception:
+            pass
+        return output
+
+    emb.register_forward_hook(_set_requires_grad)
+    setattr(emb, "_sft_grpo_require_grads_hooked", True)
 
 
 def configure_t4_attention_kernels():
@@ -141,6 +186,12 @@ def setup_model_and_tokenizer(model_config: dict, hardware_config: dict):
         logger.info("正在合并 SFT 的 LoRA adapter...")
         model = PeftModel.from_pretrained(base_model, model_path)
         model = model.merge_and_unload()  # 合并 LoRA 权重到 base model
+        # merge_and_unload 后有时仍残留 peft_config 属性，可能导致“多 adapter”告警
+        if hasattr(model, "peft_config"):
+            try:
+                delattr(model, "peft_config")
+            except Exception:
+                pass
         logger.info("✓ LoRA adapter 已合并")
     else:
         tokenizer = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True)
@@ -157,6 +208,10 @@ def setup_model_and_tokenizer(model_config: dict, hardware_config: dict):
 
     logger.info(f"✓ 模型已加载到: {next(model.parameters()).device}")
 
+    # GRPO/RL 训练通常需要关掉 cache（与 gradient checkpointing 也冲突）
+    if hasattr(model, "config"):
+        model.config.use_cache = False
+
     # 为 GRPO 训练添加新的 LoRA adapter
     if model_config.get('use_lora', False):
         logger.info("正在为 GRPO 配置新的 LoRA...")
@@ -171,15 +226,22 @@ def setup_model_and_tokenizer(model_config: dict, hardware_config: dict):
         model = get_peft_model(model, lora_config)
         model.print_trainable_parameters()
 
-    # 关键：梯度检查点 + LoRA 需要显式启用输入梯度
-    if hasattr(model, 'enable_input_require_grads'):
-        model.enable_input_require_grads()
-        logger.info("✓ 已启用 input_require_grads（梯度检查点兼容）")
+    # 只在配置开启时启用 gradient checkpointing（避免不必要的复杂性）
+    use_gradient_ckpt = bool(hardware_config.get("gradient_checkpointing", False))
+    if use_gradient_ckpt:
+        _force_input_require_grads(model)
+        logger.info("✓ 已启用 input_require_grads（gradient checkpointing 兼容）")
+        if hasattr(model, 'gradient_checkpointing_enable'):
+            model.gradient_checkpointing_enable()
+            logger.info("✓ 已启用梯度检查点")
 
-    # 启用梯度检查点节省显存
-    if hasattr(model, 'gradient_checkpointing_enable'):
-        model.gradient_checkpointing_enable()
-        logger.info("✓ 已启用梯度检查点")
+    # generation 必备：补齐 pad/eos 的 id，避免生成被异常 padding/截断影响
+    if hasattr(model, "generation_config") and hasattr(tokenizer, "eos_token_id"):
+        try:
+            model.generation_config.eos_token_id = tokenizer.eos_token_id
+            model.generation_config.pad_token_id = tokenizer.pad_token_id
+        except Exception:
+            pass
 
     return model, tokenizer
 
@@ -192,6 +254,7 @@ def setup_grpo_config(config: dict) -> GRPOConfig:
     grpo_config = config['grpo']
 
     use_fp16 = bool(hardware_config.get("fp16", False))
+    use_gradient_ckpt = bool(hardware_config.get("gradient_checkpointing", False))
 
     kwargs = dict(
         output_dir=training_config['output_dir'],
@@ -209,7 +272,11 @@ def setup_grpo_config(config: dict) -> GRPOConfig:
         fp16=use_fp16,
         bf16=False,  # T4 不支持 bf16
 
-        gradient_checkpointing=hardware_config['gradient_checkpointing'],
+        gradient_checkpointing=use_gradient_ckpt,
+        # torch>=2 默认使用 reentrant checkpoint；在 RL 的“生成阶段 no_grad + checkpoint”下
+        # 容易触发 'None of the inputs have requires_grad=True' 警告。
+        # 非 reentrant 模式通常更稳、更少噪音。
+        gradient_checkpointing_kwargs={"use_reentrant": False} if use_gradient_ckpt else None,
         dataloader_num_workers=hardware_config['dataloader_num_workers'],
         remove_unused_columns=False,
 
@@ -218,6 +285,7 @@ def setup_grpo_config(config: dict) -> GRPOConfig:
         temperature=grpo_config['temperature'],
         max_prompt_length=config['data']['max_prompt_length'],
         max_completion_length=config['data']['max_new_tokens'],
+        beta=float(grpo_config.get("beta", 0.04)),
 
         # 其他
         seed=misc_config['seed'],
@@ -232,7 +300,15 @@ def setup_grpo_config(config: dict) -> GRPOConfig:
 def main():
     parser = argparse.ArgumentParser(description='GRPO 训练脚本')
     parser.add_argument('--config', type=str, required=True, help='配置文件路径')
+    parser.add_argument('--max_steps', type=int, default=None, help='仅跑前 N 个 update steps（用于快速验证）')
+    parser.add_argument('--log_file', type=str, default=None, help='日志文件路径（默认 logs/grpo_training.log）')
     args = parser.parse_args()
+
+    # 默认把日志集中到 logs/ 目录
+    if args.log_file is None:
+        args.log_file = os.path.join("logs", "grpo_training.log")
+    global logger
+    logger = _setup_logging(args.log_file)
 
     logger.info(f"正在加载配置文件: {args.config}")
     config = load_config(args.config)
@@ -253,17 +329,42 @@ def main():
     if 'reference' in dataset.column_names:
         dataset = dataset.remove_columns([c for c in dataset.column_names if c != 'prompt'])
 
+    # 对 Instruct 模型，使用 chat template 往往能显著改善“生成不自然结束（不出 eos）”的问题，
+    # 避免 completion_length 长期打满 max_new_tokens。
+    if hasattr(tokenizer, "apply_chat_template"):
+        def _to_chat_prompt(examples):
+            prompts = []
+            for p in examples["prompt"]:
+                messages = [{"role": "user", "content": p}]
+                prompts.append(
+                    tokenizer.apply_chat_template(
+                        messages,
+                        tokenize=False,
+                        add_generation_prompt=True,
+                    )
+                )
+            return {"prompt": prompts}
+
+        dataset = dataset.map(_to_chat_prompt, batched=True)
+
     logger.info(f"数据集字段: {dataset.column_names}")
     logger.info(f"训练样本总数: {len(dataset)}")
 
     # 设置 GRPO 配置
     grpo_config = setup_grpo_config(config)
+    if args.max_steps is not None and args.max_steps > 0:
+        # TRL/Transformers 的 TrainingArguments: max_steps 会覆盖 epoch
+        grpo_config.max_steps = int(args.max_steps)
+        # 短跑验证时，确保至少会打日志（否则看不到 reward/kl 等指标）
+        if getattr(grpo_config, "logging_steps", None) and grpo_config.logging_steps > grpo_config.max_steps:
+            grpo_config.logging_steps = 1
     logger.info(
         f"✓ GRPO 配置: epochs={grpo_config.num_train_epochs}, "
         f"batch_size={grpo_config.per_device_train_batch_size}, "
         f"grad_accum={grpo_config.gradient_accumulation_steps}, "
         f"group_size(num_generations)={grpo_config.num_generations}, "
-        f"fp16={grpo_config.fp16}"
+        f"fp16={grpo_config.fp16}, "
+        f"max_steps={getattr(grpo_config, 'max_steps', None)}"
     )
 
     # 创建 GRPO Trainer

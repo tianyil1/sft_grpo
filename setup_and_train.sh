@@ -8,7 +8,9 @@ set -e  # 遇到错误立即退出
 
 # 项目根目录（脚本所在目录）
 PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-LOG_FILE="${PROJECT_ROOT}/training.log"
+LOG_DIR="${PROJECT_ROOT}/logs"
+mkdir -p "${LOG_DIR}"
+LOG_FILE="${LOG_DIR}/training.log"
 exec > >(tee -a "$LOG_FILE") 2>&1
 
 echo "=========================================="
